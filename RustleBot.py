@@ -196,7 +196,7 @@ def on_message(ws, msg):
 
 	#allows anyone to use the !yee command
 	#if m['data'].lower().startswith('!yee') and allowSuperuser(m['nick']):
-	if m['nick'] in ADMINS and m['data'].lower().startswith('!yee'):\
+	if m['nick'] in ADMINS and m['data'].lower().startswith('!yee'):
 		if any(s in l for l in m['features'] for s in ALLOWED) or m['nick'] in ADMINS:
 			sendMsg(m['nick'] + ' YEE hillshire.tv/YEE', "YEE", m['nick'], ws)
 
