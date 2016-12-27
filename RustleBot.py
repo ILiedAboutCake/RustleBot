@@ -1,7 +1,7 @@
 #!/bin/env python
 # -*- coding: utf-8 -*-
 
-import argparse, base64, cPickle, datetime, glob, json, logging, os, pprint, platform, random, sys, time, urllib, urllib2, socket, websocket, requests, paramiko, ConfigParser
+import argparse, base64, cPickle, datetime, glob, json, logging, os, pprint, platform, random, sys, time, urllib, urllib2, socket, websocket, requests, paramiko, ConfigParser, pyotp
 
 #makes error reporting work for websocket-client
 logging.basicConfig(level=logging.INFO)
@@ -10,10 +10,9 @@ logger.disabled = False
 
 #get the configuration file
 config = ConfigParser.ConfigParser()
-config.read("rustleBot.cfg")
+config.read("RustleBot.cfg")
 
 #set the variables to make this shit run
-SUPERUSER = config.get("general", "superuser") #owner of the bot
 ALLOWED = ['subscriber', 'flair1', 'flair3', 'flair4', 'flair5', 'flair8', 'protected', 'vip', 'moderator', 'admin', 'bot'] #tier1/tier2/tier3/trusted/tier4/contrib/protected/vip/mod/admin/bot
 DANKMEMES = [e.strip() for e in config.get("general", "defaultemotes").split(',')] #failsafe emotes in case dgg cant serve them 
 RATELIMIT = int(config.get("general", "ratelimit")) #seconds in between sending messages for plebs
@@ -25,9 +24,13 @@ coreEndpoint = config.get("healthcheck","core") #frontend server (pre-cloudflare
 healthUsername = config.get("healthcheck","username") #ssh username
 healthPassword = config.get("healthcheck","password") #password
 apiAdminSecret = config.get("general","secret")#do not show this to anyone holyshit
+totp = pyotp.TOTP(config.get("general","otpSecret")) #https://github.com/pyotp/pyotp
 
 #load in the pickles gachiGASM
 ADMINS = cPickle.load(open('adminlist.pkl', 'rb'))
+
+SUPERLOGGEDIN = False
+SUPERTIMER = 0
 
 COOLDOWN = int(time.time() - RATELIMIT)
 LASTMSG = random.choice(DANKMEMES)
@@ -131,7 +134,7 @@ def sendMsg(msg, command, user, ws):
 		msg = msg + " " + random.choice(DANKMEMES)
 
 	#allow admin users to bypass the rate limiter completely
-	if user in ADMINS or user == SUPERUSER:
+	if user in ADMINS or user == config.get("general", "superuser"):
 		ws.send('MSG {"data":"' + msg + '"}')
 		LASTMSG = msg
 		print '[NORATE][' + command + ']: Called by ' + user
@@ -145,10 +148,27 @@ def sendMsg(msg, command, user, ws):
 			print '[' + command + ']: Called by ' + user 
 			print "[RATE]: Rate Limited user " + user +", last message was sent to chat " + str(round(time.time() - COOLDOWN)) + " seconds ago."
 
+#requires the superuser to be defined + logged in with OTP
+def allowSuperuser(user):
+	global SUPERLOGGEDIN
+	global SUPERTIMER
+
+	if user != config.get("general", "superuser"):
+		return False
+
+	if SUPERLOGGEDIN == False:
+		return False
+
+	if SUPERTIMER < time.time():
+		return False
+	else:
+		return True
 
 
 def on_message(ws, msg):
 	global RATELIMIT
+	global SUPERLOGGEDIN
+	global SUPERTIMER
 
 	#disect what we get
 	m = parse_chat_protocol(msg)
@@ -175,8 +195,8 @@ def on_message(ws, msg):
 		sendMsg('AD:' + str(len(ADMINS)) + ', RL:' + str(RATELIMIT) + 's, RT:' + str(tdformat(unixstamp - int(LAUNCHTIME))) + ', ' + random.choice(DANKMEMES), "STATUS", m['nick'], ws)
 
 	#allows anyone to use the !yee command
-	#if m['nick'] in ADMINS and m['data'].lower().startswith('!yee'):
-	if m['nick'] in ADMINS and m['data'].lower().startswith('!yee'):
+	#if m['data'].lower().startswith('!yee') and allowSuperuser(m['nick']):
+	if m['nick'] in ADMINS and m['data'].lower().startswith('!yee'):\
 		if any(s in l for l in m['features'] for s in ALLOWED) or m['nick'] in ADMINS:
 			sendMsg(m['nick'] + ' YEE hillshire.tv/YEE', "YEE", m['nick'], ws)
 
@@ -184,17 +204,17 @@ def on_message(ws, msg):
 	if m['nick'] in ADMINS and m['data'].lower().startswith('!rustlebot'):
 		commandArray = m['data'].split()
 
-		if "admin add" in m['data'] and m['nick'] == SUPERUSER:
+		if "admin add" in m['data'] and allowSuperuser(m['nick']):
 			ADMINS.append(commandArray[3])
 			cPickle.dump(ADMINS, open('adminlist.pkl', 'wb'))
 			sendMsg(commandArray[3] + ' has been added to the admin privileged group SOTRIGGERED', "RustleBot +adminad", m['nick'], ws)
 
-		elif "admin remove" in m['data'] and m['nick'] == SUPERUSER:
-			ADMINS.delete(commandArray[3])
+		elif "admin remove" in m['data'] and allowSuperuser(m['nick']):
+			ADMINS.remove(commandArray[3])
 			cPickle.dump(ADMINS, open('adminlist.pkl', 'wb'))
 			sendMsg(commandArray[3] + ' has been removed from the admin privileged group SOTRIGGERED', "RustleBot +adminrm", m['nick'], ws)
 
-		elif "admin check" in m['data'] and m['nick'] == SUPERUSER:
+		elif "admin check" in m['data'] and m['nick'] == config.get("general", "superuser"): #soft superuser
 			if commandArray[3] in ADMINS:
 				sendMsg(commandArray[3] + ' found on admins list ', "RustleBot +adminck", m['nick'], ws)
 			else:
@@ -214,11 +234,27 @@ def on_message(ws, msg):
 		elif "emotes" in m['data']:
 			sendMsg(getDggEmotes(), "RustleBot +emotes", m['nick'], ws)
 
+		#handle OTP checks and authing the superuser
+		elif "login" in commandArray[1] and m['nick'] == config.get("general", "superuser"):
+			if int(totp.now()) == int(commandArray[2].strip()):
+				sendMsg(m['nick'] + ' OTP looks good. Authenticated for 360 minutes (6 hours) or until !rustlebot logout', "RustleBot Login <otp>", m['nick'], ws)
+				SUPERLOGGEDIN = True
+				SUPERTIMER = unixstamp + (6*60*60) #hours * minutes * seconds
+			else:
+				sendMsg(m['nick'] + ' Incorrect OTP ', "RustleBot Login <otp>", m['nick'], ws)
+				return
+
+		#handle OTP checks and authing the superuser
+		elif "logout" in commandArray[1] and allowSuperuser(m['nick']):
+			SUPERLOGGEDIN = False
+			SUPERTIMER = unixstamp
+			sendMsg(m['nick'] + ' thanks for playing FrankerZ /', "RustleBot Login <otp>", m['nick'], ws)
+
 		else:
 			sendMsg('Read The Fucking Manual OhKrappa ' + m['nick'], "RustleBot +RTFM", m['nick'], ws)
 
 	#superuser eval
-	if m['nick'] == SUPERUSER and m['data'].lower().startswith('!eval'):
+	if m['data'].lower().startswith('!eval') and allowSuperuser(m['nick']):
 		evalData = eval(m['data'][5:])
 		sendMsg('/me ' + str(evalData), "EVAL", m['nick'], ws)
 
